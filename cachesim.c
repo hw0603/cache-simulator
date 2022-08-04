@@ -96,7 +96,7 @@ void parseargv(int argc, char* argv[], int* cache_size, int* block_size, int* se
 
     // check argument length
     if (argc != 5) {
-        puts("Invaild argument");
+        puts("Invalid argument");
         exit(1);
     }
     // parse passed argument
