@@ -25,7 +25,7 @@ typedef struct SET {
 } SET;
 
 typedef struct BLOCK {
-    int lastused;
+    int fetched_time;
     uint64_t tag;
     int valid;
     int dirty;
@@ -275,7 +275,7 @@ int isHit(ADDRESS addr, int* resultidx) {
 
 // fetch block from memory and return index of block in SET
 int fetchblock(ADDRESS addr, int blockidx) {
-    int lruidx = 0; // index of the Least Recently Used block in SET
+    int victimidx = 0; // index of the First-In block in SET (Using FIFO replacement policy)
     MEMDATA* block_on_memory = NULL; // start address of block on memory includes addr
     ADDRESS blockaddr; // start address of block on memory includes addr
     uint64_t blockaddr_to_int = 0;
@@ -284,38 +284,38 @@ int fetchblock(ADDRESS addr, int blockidx) {
 
     // When cache miss occur, there are two cases
     // 1. Empty block(valid: 0) exists in SET -> find index of that block and write data
-    // 2. All blocks in SET are full -> find LRU block and write that block to memory. Then, write data to block(in cache)
+    // 2. All blocks in SET are full -> find First-In block and write that block to memory. Then, write data to block(in cache)
 
     // iterate BLOCK in SET to get proper block address
-    for (blockidx = 0, lruidx = 0; blockidx < set_size; blockidx++) {
+    for (blockidx = 0, victimidx = 0; blockidx < set_size; blockidx++) {
         // block++ until it finds empty block
         if (cache[addr.index].block[blockidx].valid == 0) {
             isemptyblock = TRUE;
             break;
         }
-        // check used-time(block->lastused) and update lruidx so that we can get the index of least-used block
-        else if (cache[addr.index].block[blockidx].lastused < cache[addr.index].block[lruidx].lastused) {
-            lruidx = blockidx;
+        // check brought-in time(block->fetched_time) and update victimidx so that we can get the index of First-In block
+        else if (cache[addr.index].block[blockidx].fetched_time < cache[addr.index].block[victimidx].fetched_time) {
+            victimidx = blockidx;
         }
     }
 
 
-    // Case #2. write LRU block to Memory and set blockidx to lruidx if SET is full
+    // Case #2. write First-In block to Memory and set blockidx to victimidx if SET is full
     if (isemptyblock == FALSE) {
         // calculate start address of LRU block
-        lrublockaddr_to_int = (cache[addr.index].block[lruidx].tag) << (index_bit + byte_offset);
+        lrublockaddr_to_int = (cache[addr.index].block[victimidx].tag) << (index_bit + byte_offset);
         lrublockaddr_to_int += (addr.index << byte_offset);
 
-        // when LRU block is dirty, write data of block to memory
-        if (cache[addr.index].block[lruidx].dirty) {
+        // when First-In block is dirty, write data of block to memory
+        if (cache[addr.index].block[victimidx].dirty) {
             for (int i = 0; i < word_count; i++) {
-                setMemdata(MEMptr, lrublockaddr_to_int + (WORDSIZE * i), cache[addr.index].block[lruidx].data[i]);
+                setMemdata(MEMptr, lrublockaddr_to_int + (WORDSIZE * i), cache[addr.index].block[victimidx].data[i]);
             }
             total_cycle += CYCLE_MEM_ACC; // increment total memory access cycle
             mem_acc_count++;
         }
-        // set blockidx to lruidx 
-        blockidx = lruidx;
+        // set blockidx to victimidx 
+        blockidx = victimidx;
     }
 
 
@@ -350,12 +350,12 @@ void write_to_cache(ADDRESS addr, int data) {
         blockidx = fetchblock(addr, blockidx);
 
         cache[addr.index].block[blockidx].tag = addr.tag;
+        cache[addr.index].block[blockidx].fetched_time = timecnt++; // update fetched-time for FIFO implementation
     }
 
     // write new data(passed to argument) to cache
     cache[addr.index].block[blockidx].dirty = 1;
     cache[addr.index].block[blockidx].valid = 1;
-    cache[addr.index].block[blockidx].lastused = timecnt++;
     cache[addr.index].block[blockidx].data[addr.block] = data;
 }
 
@@ -373,8 +373,6 @@ int read_from_cache(ADDRESS addr) {
         cache[addr.index].block[blockidx].valid = 1;
         cache[addr.index].block[blockidx].tag = addr.tag;
     }
-
-    cache[addr.index].block[blockidx].lastused = timecnt++; // time++ since "R" operation is also an access
 
     return cache[addr.index].block[blockidx].data[addr.block];
 }
