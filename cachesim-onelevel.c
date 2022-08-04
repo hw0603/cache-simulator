@@ -1,22 +1,21 @@
-// file: cachesim.c
-// author : 2018115385_류형욱 (2021-2 COMP411007 Computer Architecture)
-// datetime : 2022-07-25 01:50
-// description : Program to simulate set-associative cache
-// usage: ./cachesim -s=<cache size> -a=<set size> -b=<block size> -f=<trace file name>
-
-// TODO: optimize cache and memory structure
+// file: cachesim-onelevel.c
+// author : Ryu Hyung Uk
+// description : Program to simulate one level cache
+// usage: ./cachesim-onelevel -s=<cache size(in Bytes)> -a=<set size> -b=<block size(in Bytes)> -f=<trace file name>
 
 #define TRUE 1
 #define FALSE 0
-#define READ 3 // Read instruction
-#define WRITE 4 // Write instruction
-#define BIT_MAX 32
-#define WORDSIZE 4
-#define CYCLE_HIT 1
-#define CYCLE_MEM_ACC 200
+#define LOAD 3 // Read instruction
+#define STORE 4 // Write instruction
+#define BIT_MAX 64
+#define WORDSIZE 64
+#define CYCLE_NON_MEM_ACC 1
+#define CYCLE_CACHE_HIT 5
+#define CYCLE_MEM_ACC 100
 #define verbose FALSE // trigger verbose output
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 
@@ -26,18 +25,18 @@ typedef struct SET {
 } SET;
 
 typedef struct BLOCK {
-    int lastused;
-    int tag;
+    int fetched_time;
+    uint64_t tag;
     int valid;
     int dirty;
     int* data;
 } BLOCK;
 
 typedef struct ADDRESS {
-    int tag;
-    int index;
-    int block;
-    int byte;
+    uint64_t tag;
+    uint64_t index;
+    uint64_t block;
+    uint64_t byte;
 } ADDRESS;
 
 typedef struct MEMORY {
@@ -46,8 +45,8 @@ typedef struct MEMORY {
 } MEMORY;
 
 typedef struct MEMDATA {
-    int address;
-    int data;
+    uint64_t address;
+    uint64_t data;
     struct MEMDATA* prev;
     struct MEMDATA* next;
 } MEMDATA;
@@ -59,7 +58,8 @@ int cache_size = 0, block_size = 0, set_size = 0;
 int total_cycle = 0, hit_count = 0, miss_count = 0;
 int index_total = 0, index_bit = 0, word_count = 0;
 int byte_offset = 0, tag_bit = 0;
-int insType = 0;
+int insType = 0, insCnt = 0;
+int mem_acc_count = 0;
 SET* cache = NULL;
 BLOCK* block = NULL;
 MEMORY* MEMptr = NULL;
@@ -68,12 +68,12 @@ MEMORY* MEMptr = NULL;
 // define functions
 int log_2(int);
 void parseargv(int, char**, int*, int*, int*, char**);
-MEMDATA* getMemdata(MEMORY*, int);
-void setMemdata(MEMORY*, int, int);
+MEMDATA* getMemdata(MEMORY*, uint64_t);
+void setMemdata(MEMORY*, uint64_t, int);
 void printMemdata(MEMORY*, int, int);
 void initcache();
 void set_address();
-unsigned int getmask(int start, int cnt);
+uint64_t getmask(int start, int cnt);
 int isHit(ADDRESS, int*);
 int fetchblock(ADDRESS, int);
 void write_to_cache(ADDRESS, int);
@@ -96,7 +96,7 @@ void parseargv(int argc, char* argv[], int* cache_size, int* block_size, int* se
 
     // check argument length
     if (argc != 5) {
-        puts("Invalid argument");
+        printf("Usage: %s -s=<cache size(in Bytes)> -a=<set size> -b=<block size(in Bytes)> -f=<trace file name>\n", argv[0]);
         exit(1);
     }
     // parse passed argument
@@ -119,7 +119,7 @@ void parseargv(int argc, char* argv[], int* cache_size, int* block_size, int* se
 }
 
 // fetch WORD data from Memory
-MEMDATA* getMemdata(MEMORY* MEMptr, int addr) {
+MEMDATA* getMemdata(MEMORY* MEMptr, uint64_t addr) {
     for (MEMDATA* cur = MEMptr->head; cur; cur = cur->next) {
         if (cur->address == addr) {
             return cur;
@@ -129,7 +129,7 @@ MEMDATA* getMemdata(MEMORY* MEMptr, int addr) {
 }
 
 // write WORD data to Memory
-void setMemdata(MEMORY* MEMptr, int addr, int data) {
+void setMemdata(MEMORY* MEMptr, uint64_t addr, int data) {
     MEMDATA* mem = NULL;
 
     // no need to add MEMDATA if address already exist -> only overwrite data
@@ -185,7 +185,7 @@ void setMemdata(MEMORY* MEMptr, int addr, int data) {
 void printMemory(MEMORY* MEMptr) {
     int cnt = 1;
     for (MEMDATA* p = MEMptr->head; p; p = p->next, cnt++) {
-        printf("Address: %.8X --> DATA: %d\n", p->address, p->data);
+        printf("Address: %.20ld --> DATA: %ld\n", p->address, p->data);
         if (cnt % word_count == 0)
             putchar('\n');
     }
@@ -225,8 +225,8 @@ void initcache() {
 }
 
 // construct proper address structure
-void set_address(ADDRESS* addr, int address_int) {
-    unsigned int mask = 0;
+void set_address(ADDRESS* addr, uint64_t address_int) {
+    int64_t mask = 0;
 
     // set byte offset
     mask = getmask(0, byte_offset);
@@ -245,9 +245,9 @@ void set_address(ADDRESS* addr, int address_int) {
 }
 
 // return mask generated from start bit index and bit count from that bit
-unsigned int getmask(int start, int cnt) {
-    int upper_bit = (start + cnt >= BIT_MAX ? -1 : (1 << (start + cnt)) - 1);
-    int lower_bit = ((1 << start) - 1);
+uint64_t getmask(int start, int cnt) {
+    int64_t upper_bit = (start + cnt >= BIT_MAX ? -1 : (1 << (start + cnt)) - 1);
+    int64_t lower_bit = ((1 << start) - 1);
 
     return upper_bit - lower_bit;
 }
@@ -256,7 +256,7 @@ unsigned int getmask(int start, int cnt) {
 int isHit(ADDRESS addr, int* resultidx) {
     BLOCK current_block;
 
-    total_cycle += CYCLE_HIT; // increment total memory access cycle
+    total_cycle += CYCLE_CACHE_HIT; // increment total memory access cycle
     for (int i = 0; i < set_size; i++) {
         current_block = cache[addr.index].block[i];
         if (current_block.valid && (current_block.tag == addr.tag)) {
@@ -275,48 +275,49 @@ int isHit(ADDRESS addr, int* resultidx) {
 
 // fetch block from memory and return index of block in SET
 int fetchblock(ADDRESS addr, int blockidx) {
-    int lruidx = 0; // index of the Least Recently Used block in SET
+    int victimidx = 0; // index of the First-In block in SET (Using FIFO replacement policy)
     MEMDATA* block_on_memory = NULL; // start address of block on memory includes addr
     ADDRESS blockaddr; // start address of block on memory includes addr
-    int blockaddr_to_int = 0;
-    int lrublockaddr_to_int = 0;
+    uint64_t blockaddr_to_int = 0;
+    uint64_t lrublockaddr_to_int = 0;
     int isemptyblock = FALSE;
 
     // When cache miss occur, there are two cases
     // 1. Empty block(valid: 0) exists in SET -> find index of that block and write data
-    // 2. All blocks in SET are full -> find LRU block and write that block to memory. Then, write data to block(in cache)
+    // 2. All blocks in SET are full -> find First-In block and write that block to memory. Then, write data to block(in cache)
 
     // iterate BLOCK in SET to get proper block address
-    for (blockidx = 0, lruidx = 0; blockidx < set_size; blockidx++) {
+    for (blockidx = 0, victimidx = 0; blockidx < set_size; blockidx++) {
         // block++ until it finds empty block
         if (cache[addr.index].block[blockidx].valid == 0) {
             isemptyblock = TRUE;
             break;
         }
-        // check used-time(block->lastused) and update lruidx so that we can get the index of least-used block
-        else if (cache[addr.index].block[blockidx].lastused < cache[addr.index].block[lruidx].lastused) {
-            lruidx = blockidx;
+        // check brought-in time(block->fetched_time) and update victimidx so that we can get the index of First-In block
+        else if (cache[addr.index].block[blockidx].fetched_time < cache[addr.index].block[victimidx].fetched_time) {
+            victimidx = blockidx;
         }
     }
 
 
-    // Case #2. write LRU block to Memory and set blockidx to lruidx if SET is full
+    // Case #2. write First-In block to Memory and set blockidx to victimidx if SET is full
     if (isemptyblock == FALSE) {
         // calculate start address of LRU block
-        lrublockaddr_to_int = (cache[addr.index].block[lruidx].tag) << (index_bit + byte_offset);
+        lrublockaddr_to_int = (cache[addr.index].block[victimidx].tag) << (index_bit + byte_offset);
         lrublockaddr_to_int += (addr.index << byte_offset);
 
-        // when LRU block is dirty, write data of block to memory
-        if (cache[addr.index].block[lruidx].dirty) {
+        // when First-In block is dirty, write data of block to memory
+        if (cache[addr.index].block[victimidx].dirty) {
             for (int i = 0; i < word_count; i++) {
-                setMemdata(MEMptr, lrublockaddr_to_int + (WORDSIZE * i), cache[addr.index].block[lruidx].data[i]);
+                setMemdata(MEMptr, lrublockaddr_to_int + (WORDSIZE * i), cache[addr.index].block[victimidx].data[i]);
             }
             total_cycle += CYCLE_MEM_ACC; // increment total memory access cycle
+            mem_acc_count++;
         }
-        // set blockidx to lruidx 
-        blockidx = lruidx;
+        // set blockidx to victimidx 
+        blockidx = victimidx;
     }
-    
+
 
     // set address information(start address of block) to blockaddr
     blockaddr.tag = addr.tag;
@@ -327,24 +328,19 @@ int fetchblock(ADDRESS addr, int blockidx) {
     blockaddr_to_int += (blockaddr.tag << (index_bit + byte_offset));
     blockaddr_to_int += (blockaddr.index << byte_offset);
 
-    // copy Memory block to cache
-    if ((block_size != WORDSIZE) || (insType == READ)) {
-        /*
-        No need to fetch block from memory if (block_size == WORDSIZE) && (insType == WRITE),
-        since that block will be overwritten immediately
-        */
-        for (int i = 0; i < word_count; i++) {
-            block_on_memory = getMemdata(MEMptr, blockaddr_to_int + (WORDSIZE * i));
-            cache[addr.index].block[blockidx].data[i] = block_on_memory ? block_on_memory->data : 0;
-        }
-        total_cycle += CYCLE_MEM_ACC; // increment total memory access cycle
+    // copy Memory block to cache (using Write-Allocate policy when STORE operation performed)
+    for (int i = 0; i < word_count; i++) {
+        block_on_memory = getMemdata(MEMptr, blockaddr_to_int + (WORDSIZE * i));
+        cache[addr.index].block[blockidx].data[i] = block_on_memory ? block_on_memory->data : 0;
     }
+    total_cycle += CYCLE_MEM_ACC; // increment total memory access cycle
+    mem_acc_count++;
 
     // return blockidx to use later
     return blockidx;
 }
 
-// perform "W" operation
+// perform STORE operation
 void write_to_cache(ADDRESS addr, int data) {
     int blockidx = -1; // index of the block that we write data
 
@@ -352,18 +348,18 @@ void write_to_cache(ADDRESS addr, int data) {
     // fetch block from Memory when MISS
     if (!isHit(addr, &blockidx)) {
         blockidx = fetchblock(addr, blockidx);
-        
+
         cache[addr.index].block[blockidx].tag = addr.tag;
+        cache[addr.index].block[blockidx].fetched_time = timecnt++; // update fetched-time for FIFO implementation
     }
-    
+
     // write new data(passed to argument) to cache
     cache[addr.index].block[blockidx].dirty = 1;
     cache[addr.index].block[blockidx].valid = 1;
-    cache[addr.index].block[blockidx].lastused = timecnt++;
     cache[addr.index].block[blockidx].data[addr.block] = data;
 }
 
-// perform "R" operation
+// perform LOAD operation
 int read_from_cache(ADDRESS addr) {
     int blockidx = -1; // index of the block that we write data
 
@@ -378,16 +374,14 @@ int read_from_cache(ADDRESS addr) {
         cache[addr.index].block[blockidx].tag = addr.tag;
     }
 
-    cache[addr.index].block[blockidx].lastused = timecnt++; // time++ since "R" operation is also an access
-
     return cache[addr.index].block[blockidx].data[addr.block];
 }
 
 // prints simulation result
 void printresult(int printvalue) {
-    double miss_rate = 0, average_cycle = 0;
+    double miss_rate = 0, hit_rate = 0, average_cycle = 0, inst_per_cycle = 0;
     int dirty_count = 0;
-
+    
     for (int i = 0; i < index_total; i++) {
         printf("%d: ", i);
         for (int j = 0; j < set_size; j++) {
@@ -406,16 +400,25 @@ void printresult(int printvalue) {
         }
     }
 
+    hit_rate = 100.0 * hit_count / (hit_count + miss_count);
     miss_rate = 100.0 * miss_count / (hit_count + miss_count);
     average_cycle = (double)total_cycle / (hit_count + miss_count);
+    inst_per_cycle = (double)insCnt / (double)total_cycle;
 
     if (printvalue) {
-        printf("\ntotal number of hits: %d\n", hit_count);
-        printf("total number of misses: %d\n", miss_count);
-        printf("miss rate: %.1f%%\n", miss_rate);
-        printf("total number of dirty blocks: %d\n", dirty_count);
-        printf("total memory access cycle: %d\n", total_cycle);
-        printf("average memory access cycle: %.1f\n", average_cycle);
+        puts("");
+        printf("# of L1 cache accesses: %d\n", hit_count + miss_count);
+        printf("# of Memory accesses: %d\n", mem_acc_count);
+        printf("Cache hit rate: %.1f%%\n", hit_rate);
+        printf("Cache miss rate: %.1f%%\n", miss_rate);
+        printf("CPU time(in cycle): %d\n", total_cycle);
+        printf("Instruction per cycle: %.5f\n", inst_per_cycle);
+
+        // printf("total number of hits: %d\n", hit_count);
+        // printf("total number of misses: %d\n", miss_count);
+        // printf("total number of dirty blocks: %d\n", dirty_count);
+        // printf("total memory access cycle: %d\n", total_cycle);
+        // printf("average memory access cycle: %.1f\n", average_cycle);
     }
 }
 
@@ -445,9 +448,11 @@ void deallocate() {
 int main(int argc, char* argv[]) {
     FILE* fp = NULL;
     ADDRESS addr;
-    char address[9], accesstype;
+    char accesstype;
+    int non_mem_acc_inst_cnt;
+    char address[20];
     char* file_name;
-    int address_int = 0;
+    uint64_t address_int = 0;
     int data;
 
     // check and parse argument passed to program
@@ -458,24 +463,35 @@ int main(int argc, char* argv[]) {
 
     // read memory access log from trace file and simulate the operation
     fp = fopen(file_name, "r");
-    while (EOF != fscanf(fp, "%s %c", address, &accesstype)) {
-        address_int = strtol(address, NULL, 16);
+    while (EOF != fscanf(fp, "%c", &accesstype)) {
+        if (accesstype == '#')
+            break; // break if meet #eof mark
+        fscanf(fp, "%d %s\n", &non_mem_acc_inst_cnt, address);
+        
+        insCnt++;
+        address_int = strtol(address, NULL, 10);
         set_address(&addr, address_int);
 
-        if (accesstype == 'R') {
-            insType = READ;
+        if (accesstype == '0') {
+            insType = LOAD;
             data = read_from_cache(addr);
         }
-        else if (accesstype == 'W') {
-            insType = WRITE;
-            fscanf(fp, "%d", &data);
+        else if (accesstype == '1') {
+            insType = STORE;
+            // fscanf(fp, "%d", &data);
+            data = rand() % 65536; // DUMMY data
             write_to_cache(addr, data);
         }
 
+        // increment non-Memory access instruction cycle
+        total_cycle += (non_mem_acc_inst_cnt * CYCLE_NON_MEM_ACC);
+        // increment total instruction count
+        insCnt += non_mem_acc_inst_cnt;
+
         if (verbose) {
-            if (accesstype == 'R')
+            if (insType == LOAD)
                 printf("[%d] Read from %s --> %d Found\n", timecnt - 1, address, data);
-            else if (accesstype == 'W')
+            else if (insType == STORE)
                 printf("[%d] Write %d to %s\n", timecnt - 1, data, address);
 
             puts("--------------------------------------------------------");
