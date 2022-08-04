@@ -450,7 +450,8 @@ void deallocate() {
 int main(int argc, char* argv[]) {
     FILE* fp = NULL;
     ADDRESS addr;
-    int accesstype, non_mem_acc_inst_cnt;
+    char accesstype;
+    int non_mem_acc_inst_cnt;
     char address[20];
     char* file_name;
     uint64_t address_int = 0;
@@ -464,16 +465,20 @@ int main(int argc, char* argv[]) {
 
     // read memory access log from trace file and simulate the operation
     fp = fopen(file_name, "r");
-    while (EOF != fscanf(fp, "%d %d %s", &accesstype, &non_mem_acc_inst_cnt, address)) {
+    while (EOF != fscanf(fp, "%c", &accesstype)) {
+        if (accesstype == '#')
+            break; // break if meet #eof mark
+        fscanf(fp, "%d %s\n", &non_mem_acc_inst_cnt, address);
+        
         insCnt++;
         address_int = strtol(address, NULL, 10);
         set_address(&addr, address_int);
 
-        if (accesstype == 0) {
+        if (accesstype == '0') {
             insType = LOAD;
             data = read_from_cache(addr);
         }
-        else if (accesstype == 1) {
+        else if (accesstype == '1') {
             insType = STORE;
             // fscanf(fp, "%d", &data);
             data = rand() % 65536; // DUMMY data
